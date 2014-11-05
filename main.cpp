@@ -5,15 +5,19 @@
 #include <cuda_runtime.h>
 #include <cuda_gl_interop.h>
 #include <helper_cuda.h>
+#include <cstdlib>
+#include <ctime>
 #include "camera.h"
 #include "shaderprogram.h"
 #include "platform.h"
 #include "fileutils.h"
 #include "matrixutils.h"
 
+//#define DEBUG_TO_COUT
+
 #define WIDTH 1024
 #define HEIGHT 768
-#define NUM_PARTICLES 512 * 512
+#define NUM_PARTICLES 512
 
 // globals
 ArcballCamera* camera;
@@ -26,12 +30,15 @@ GLuint particlesVBO;
 GLuint particlesNumVertices = 0;
 struct cudaGraphicsResource* cuVboResource;
 bool runSimulation = false;
-REAL time = REAL(0);
+REAL t = REAL(0);
+
+float* particle_data;
 
 // forward declaration
 extern "C" 
 {
 	void launchParticleKernel(float *ptVbo, int numParticles, float t, float dT);
+    void launchKernel(float* a, float* b, float* c);
 }
 
 bool initGL()
@@ -80,8 +87,9 @@ bool initGL()
 	}
 	
 	fireShaderProgram = new ShaderProgram();
-	fireShaderProgram->addShaderFromSource(ShaderProgram::SHADER_VERTEX, "./media/shader/particle.vs");
-	fireShaderProgram->addShaderFromSource(ShaderProgram::SHADER_FRAGMENT, "./media/shader/particle.fs");
+    fireShaderProgram->addShaderFromSource(ShaderProgram::SHADER_VERTEX, "./media/shader/sphere.vs");
+    fireShaderProgram->addShaderFromSource(ShaderProgram::SHADER_GEOMETRY, "./media/shader/sphere.gs");
+    fireShaderProgram->addShaderFromSource(ShaderProgram::SHADER_FRAGMENT, "./media/shader/sphere.fs");
 	if(!fireShaderProgram->link())
 	{
 		LOG("particle shader linkage error");
@@ -93,19 +101,22 @@ bool initGL()
 
 void initBuffers()
 {
+    float* v;
+    unsigned int vertexSize;
+#ifdef VOLCANO
 	// load volcano
 	std::vector<vec2> _ST(0);
 	std::vector<vec3> _V(0), _N(0);
 	std::vector<vec4> _C(0);
-	std::vector<ivec3> _T(0);
+    std::vector<ivec3> _T(0);
 	importTriangleMeshFromOFF("./media/meshes/volcano.off", _V, _N, _T);
-	
+
 	glGenBuffers(1, &volcanoVBO);
 	glBindBuffer(GL_ARRAY_BUFFER, volcanoVBO);
-	unsigned int vertexSize = 12; // vertex interleaved layout: 3 pos, 3 norm, 4 col, 2 uv
-	float* v = new float[_V.size() * vertexSize];
+    vertexSize = 12; // vertex interleaved layout: 3 pos, 3 norm, 4 col, 2 uv
+    v = new float[_V.size() * vertexSize];
 	for(unsigned int i = 0; i < _V.size(); ++i)
-	{
+    {
 		v[vertexSize*i+0] = _V[i].x();
 		v[vertexSize*i+1] = _V[i].y();
 		v[vertexSize*i+2] = _V[i].z();
@@ -135,28 +146,78 @@ void initBuffers()
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, _T.size()*3*sizeof(unsigned int), &t[0], GL_STATIC_DRAW);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 	volcanoNumTriangles = _T.size();
-	delete [] t;
+    delete [] t;
+#endif
 	
 	// create particles
-	// TODO: 1a)
-	
+    // TODO: 1a)
+//    srand(time(0));
+    glGenBuffers(1, &particlesVBO);
+    glBindBuffer(GL_ARRAY_BUFFER, particlesVBO);
+    vertexSize = 12; //layout: 3 position, 3 impulse, 4 color, 1 age, 1 mass
+    v = new float[NUM_PARTICLES * vertexSize];
+    for (unsigned int i = 0; i < NUM_PARTICLES; ++i) {
+        // pos
+        v[vertexSize*i+0] = 0;
+        v[vertexSize*i+1] = 0;
+        v[vertexSize*i+2] = 0;
+        // impulse
+        v[vertexSize*i+3] = 0;
+        v[vertexSize*i+4] = 1;
+        v[vertexSize*i+5] = 0;
+        // color
+        v[vertexSize*i+6] = 0;
+        v[vertexSize*i+7] = 0;
+        v[vertexSize*i+8] = 0;
+        v[vertexSize*i+9] = 0;
+        // age
+        v[vertexSize*i+10] = 0;
+        // mass
+        v[vertexSize*i+11] = 1;
+    }
+    glBufferData(GL_ARRAY_BUFFER, NUM_PARTICLES*vertexSize*sizeof(float), &v[0], GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    particlesNumVertices = NUM_PARTICLES;
+    delete[] v;
+
 	// connect particle buffer to cuda
 	// TODO: 1b)
+    cudaGLRegisterBufferObject(particlesVBO);
+}
+
+void cuda_test() {
+    float a = 33;
+    float b = 9;
+    float c = 0;
+    float *pa, *pb, *pc;
+    cudaMalloc((void**) &pa, sizeof(float));
+    cudaMalloc((void**) &pb, sizeof(float));
+    cudaMalloc((void**) &pc, sizeof(float));
+    cudaMemcpy(pa, &a, sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(pb, &b, sizeof(float), cudaMemcpyHostToDevice);
+    launchKernel(pa, pb, pc);
+    cudaMemcpy(&c, pc, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(pa);
+    cudaFree(pb);
+    cudaFree(pc);
+    std::cout << " === " << c << " === " << std::endl;
 }
 
 void init()
 {
-	camera = new ArcballCamera();
-	camera->setLookAt(vec3(0,0,3), vec3(0,0,0), vec3(0,1,0));
-	initGL();
-	initBuffers();	
-	glutPostRedisplay();
+    camera = new ArcballCamera();
+    camera->setLookAt(vec3(0,0,3), vec3(0,0,0), vec3(0,1,0));
+    initGL();
+    initBuffers();
+    glutPostRedisplay();
 }
 
 void shutdown()
 {
 	// unregister particle buffer to cuda
-	// TODO: 1b)
+    // TODO: 1b)
+    cudaGLUnregisterBufferObject(particlesVBO);
+    cudaFree(particle_data);
 
 	if(glIsBuffer(particlesVBO))
 		glDeleteBuffers(1, &particlesVBO);
@@ -176,8 +237,24 @@ void display()
 {
 	// simulation
 	if(runSimulation)
-	{
-		// TODO: 1c)
+    {
+        // TODO: 1c)
+        cudaGLMapBufferObject((void**) &particle_data, particlesVBO);
+
+        const REAL timestep = REAL(0.005);
+        launchParticleKernel(particle_data, NUM_PARTICLES, t, timestep);
+        t += timestep;
+
+#ifdef DEBUG_TO_COUT
+        float tmp[12];
+        cudaMemcpy(tmp, particle_data, 12*sizeof(float),
+                   cudaMemcpyDeviceToHost);
+        for (int i = 0; i < 12; ++i)
+            std::cout << tmp[i] << " ";
+        std::cout << std::endl;
+#endif
+
+        cudaGLUnmapBufferObject(particlesVBO);
 	}
 	
 	//
@@ -195,35 +272,37 @@ void display()
 
 	// rendering
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	
+
 	// draw volcano
-	volcanoShaderProgram->bind();
-	glUniformMatrix4fv(volcanoShaderProgram->uniform("view_matrix"), 1, false, viewM.data());
-	glUniformMatrix4fv(volcanoShaderProgram->uniform("proj_matrix"), 1, false, projM.data());
-	glUniformMatrix4fv(volcanoShaderProgram->uniform("model_matrix"), 1, false, modelM.data());
-	glUniformMatrix3fv(volcanoShaderProgram->uniform("normal_matrix"), 1, false, normalM.data());
-	glUniform1i(volcanoShaderProgram->uniform("bGlow"), 1);
+#ifdef VOLCANO
+    volcanoShaderProgram->bind();
+    glUniformMatrix4fv(volcanoShaderProgram->uniform("view_matrix"), 1, false, viewM.data());
+    glUniformMatrix4fv(volcanoShaderProgram->uniform("proj_matrix"), 1, false, projM.data());
+    glUniformMatrix4fv(volcanoShaderProgram->uniform("model_matrix"), 1, false, modelM.data());
+    glUniformMatrix3fv(volcanoShaderProgram->uniform("normal_matrix"), 1, false, normalM.data());
+    glUniform1i(volcanoShaderProgram->uniform("bGlow"), 1);
 
-	glBindBuffer(GL_ARRAY_BUFFER, volcanoVBO);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*)(0));
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*)(12));
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*)(24));
-	glEnableVertexAttribArray(2);
-	glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*)(40));
-	glEnableVertexAttribArray(3);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ARRAY_BUFFER, volcanoVBO);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*)(0));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*)(12));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*)(24));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*)(40));
+    glEnableVertexAttribArray(3);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, volcanoIBO);
-	glDrawElements(GL_TRIANGLES, 3*volcanoNumTriangles, GL_UNSIGNED_INT, (void*)(0));
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, volcanoIBO);
+    glDrawElements(GL_TRIANGLES, 3*volcanoNumTriangles, GL_UNSIGNED_INT, (void*)(0));
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
-	glDisableVertexAttribArray(0);
-	glDisableVertexAttribArray(1);
-	glDisableVertexAttribArray(2);
-	glDisableVertexAttribArray(3);
-	volcanoShaderProgram->release();
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(2);
+    glDisableVertexAttribArray(3);
+    volcanoShaderProgram->release();
+#endif
 
 	// draw particles
 	fireShaderProgram->bind();
@@ -242,12 +321,12 @@ void display()
 	glEnableVertexAttribArray(3);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	
-	glEnable(GL_BLEND);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-	glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glDepthMask(GL_FALSE);
 	glDrawArrays(GL_POINTS, 0, particlesNumVertices);
-	glDepthMask(GL_TRUE);
-	glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
 	
 	glDisableVertexAttribArray(0);
 	glDisableVertexAttribArray(1);
@@ -255,7 +334,7 @@ void display()
 	glDisableVertexAttribArray(3);
 	fireShaderProgram->release();
 
-	glutSwapBuffers();
+    glutSwapBuffers();
 }
 
 void resize(int w, int h)
@@ -264,16 +343,16 @@ void resize(int w, int h)
 	camera->resize(w, h);
 	camera->setPerspectiveProjection(REAL(45), aspect, REAL(0.3), REAL(100.0));
 	glViewport(0,0,w,h);
-	glutPostRedisplay();
+    glutPostRedisplay();
 }
 
 void idle()
 {
 	// step forward
 	if(runSimulation)
-		time += REAL(0.005);
+        t += REAL(0.005);
 	
-	glutPostRedisplay();
+    glutPostRedisplay();
 }
 
 void mouseButton(int button, int state, int x, int y)
@@ -304,7 +383,7 @@ void mouseButton(int button, int state, int x, int y)
 void mouseMove(int x, int y)
 {
 	camera->move(x,y);
-	glutPostRedisplay();
+    glutPostRedisplay();
 }
 
 void key(unsigned char key, int x, int y)
@@ -318,27 +397,30 @@ void key(unsigned char key, int x, int y)
 
 		case 32:
 			runSimulation = !runSimulation;
+            std::cout << "RUN" << std::endl;
 			break;
 	}
-	glutPostRedisplay();
+    glutPostRedisplay();
 }
+
 
 int main(int argc, char* argv[])
 {
-	glutInit(&argc, argv);
+    cuda_test();
+
+    glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH);
     glutInitWindowSize(WIDTH, HEIGHT);
-    glutCreateWindow("aGPhys - 1 a) (Particles)");
+    glutCreateWindow("Volcano");
     glutDisplayFunc(display);
     glutReshapeFunc(resize);
     glutIdleFunc(idle);
     glutKeyboardFunc(key);
     glutMouseFunc(mouseButton);
-    glutMotionFunc(mouseMove);    
+    glutMotionFunc(mouseMove);
     glutCloseFunc(shutdown);
-	
-	init();
+
+    init();
     glutMainLoop();
-	
 	return 0;
 }

@@ -39,33 +39,34 @@ __device__ float3 noise3D()
 __device__ float3 distractDirection3D(float3 vIn, float range)
 {
 	float2 N = noise2D();
-	float phi = 2.0f * 3.1415926536f * N.y;
-	float cosTheta = sqrtf(1.0f-N.x);
+    float phi = 2.0f * 3.1415926536f * N.y;
+    float cosTheta = sqrtf(N.x/2+.5f);
 	float sinTheta = sqrtf(1.0f-cosTheta*cosTheta);
 	float3 localSampling = make_float3(sinTheta*cosf(phi), cosTheta, sinTheta*sinf(phi));
 	localSampling.x *= range;
 	localSampling.z *= range;
 
-	// transform to worldspace
-	float3 y = vIn;
-	float3 h = y;
-	if(fabs(h.x) <= fabs(h.y) && fabs(h.x) <= fabs(h.z))
-	{
-		h.x = 1.0f;
-	}
-	else if(fabs(h.y) <= fabs(h.x) && fabs(h.y) <= fabs(h.z))
-	{
-		h.y = 1.0f;
-	}
-	else
-	{
-		h.z = 1.0f;
-	}
+//	// transform to worldspace
+//	float3 y = vIn;
+//	float3 h = y;
+//	if(fabs(h.x) <= fabs(h.y) && fabs(h.x) <= fabs(h.z))
+//	{
+//		h.x = 1.0f;
+//	}
+//	else if(fabs(h.y) <= fabs(h.x) && fabs(h.y) <= fabs(h.z))
+//	{
+//		h.y = 1.0f;
+//	}
+//	else
+//	{
+//		h.z = 1.0f;
+//	}
 
-	float3 x = normalize(cross(h,y));
-	float3 z = normalize(cross(x,y));
+//	float3 x = normalize(cross(h,y));
+//	float3 z = normalize(cross(x,y));
 
-	return normalize(localSampling.x * x + localSampling.y * y + localSampling.z * z);
+//	return normalize(localSampling.x * x + localSampling.y * y + localSampling.z * z);
+    return localSampling;
 }
 
 // integrators
@@ -135,6 +136,7 @@ __device__ ParticleState rungeKutta4XP(ParticleState curState,
 // color helper
 __device__ float4 colorForAge(float age)
 {
+    age *= 0.3;
 	float4 result;
 	result.x = (30.0f+age)/80.0f;
 	result.y = (5.0f+age)/55.0f;
@@ -174,13 +176,13 @@ __global__ void particleKernel(float *ptVbo, int numParticles, float t, float dT
 	currentState.age = ptVbo[12*i + 10];
 	
 	// check particles lifecycle
-	if(currentState.age <= 0.0f || currentState.X.y <= 0.0f)
+    if(currentState.age <= 0.0f/* || currentState.X.y <= 0.0f*/)
 	{
 		// start position + noise
 		float3 pos = make_float3(-0.03f, 0.3f, 0.0f) + make_float3(0.02f,0.01f,0.02f) * normalize(noise3D());
 	
 		// start impulse + noise
-		float3 imp = 0.06f * noise() * distractDirection3D(make_float3(0.0f,1.0f,0.0f), 0.1f);
+        float3 imp = 0.5f * noise() * distractDirection3D(make_float3(0.0f,1.0f,0.0f), 0.2f);
 		
 		// create a new particle
 		ptVbo[12*i + 0] = pos.x;
@@ -193,13 +195,13 @@ __global__ void particleKernel(float *ptVbo, int numParticles, float t, float dT
 		ptVbo[12*i + 7] = 0.8f;
 		ptVbo[12*i + 8] = 0.8f;
 		ptVbo[12*i + 9] = 0.1f;
-		ptVbo[12*i + 10] = 50.0f*noise();
+        ptVbo[12*i + 10] = 6*noise();
 	}
 	else 
 	{
 		// integrate state
-		//ParticleState newState = rungeKutta4XP(currentState, make_float3(0,-0.1,0), 1, dT);
-		ParticleState newState = euler(currentState, make_float3(0,-0.001,0), 1, dT);
+        ParticleState newState = rungeKutta4XP(currentState, make_float3(0,-0.3,0), 1, dT);
+        //ParticleState newState = euler(currentState, make_float3(0,-0.001,0), 1, dT);
 		newState.age = currentState.age - dT;
 
 		// distract position
@@ -208,6 +210,8 @@ __global__ void particleKernel(float *ptVbo, int numParticles, float t, float dT
 
 		// create color according the state
 		float4 color = colorForAge(newState.age);
+
+        newState.P += 0.001 * noise3D();
 
 		// write back result
 		ptVbo[12*i + 0] = newState.X.x;

@@ -18,7 +18,7 @@ void main()
     // output vertex data
 	V = v_velocity;
 	C = vec4(v_color.xyz, 0.05);
-	C *= smoothstep(0.0,0.5,v_position.y),
+        C *= smoothstep(0.0,0.5,v_position.y+0.1),
 	ST = v_st;
 	
     // and projected
