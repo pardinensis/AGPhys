@@ -5,8 +5,8 @@
 #include <cuda_runtime.h>
 #include <cuda_gl_interop.h>
 #include <helper_cuda.h>
-#include <cstdlib>
-#include <ctime>
+#include <algorithm>
+#include "misc.h"
 #include "camera.h"
 #include "shaderprogram.h"
 #include "platform.h"
@@ -15,9 +15,16 @@
 
 //#define DEBUG_TO_COUT
 
+//#define VOLCANO
+//#define PARTICLE_TEST
+
 #define WIDTH 1024
 #define HEIGHT 768
-#define NUM_PARTICLES 512
+#define NUM_PARTICLES 4096
+#define PARTICLE_GRIDSIZE 8
+#define PARTICLE_GRIDSCALE 1
+#define PARTICLE_JITTER_FACTOR 0.2
+#define PARTICLE_SPAWN_HEIGHT 3
 
 // globals
 ArcballCamera* camera;
@@ -33,11 +40,12 @@ bool runSimulation = false;
 REAL t = REAL(0);
 
 float* particle_data;
+float* particle_f_tmp;
 
 // forward declaration
 extern "C" 
 {
-	void launchParticleKernel(float *ptVbo, int numParticles, float t, float dT);
+    void launchParticleKernel(float *ptVbo, float* f_tmp, int numParticles, float t, float dT);
     void launchKernel(float* a, float* b, float* c);
 }
 
@@ -148,28 +156,45 @@ void initBuffers()
 	volcanoNumTriangles = _T.size();
     delete [] t;
 #endif
-	
-	// create particles
-    // TODO: 1a)
-//    srand(time(0));
+
+    // create particles
+    cudaMalloc((void**) &particle_f_tmp, NUM_PARTICLES * 3 * sizeof(float));
     glGenBuffers(1, &particlesVBO);
     glBindBuffer(GL_ARRAY_BUFFER, particlesVBO);
     vertexSize = 12; //layout: 3 position, 3 impulse, 4 color, 1 age, 1 mass
     v = new float[NUM_PARTICLES * vertexSize];
+    float distance = PARTICLE_GRIDSCALE / (float)std::max(PARTICLE_GRIDSIZE - 1, 1);
     for (unsigned int i = 0; i < NUM_PARTICLES; ++i) {
+        float radius = random::normal(0.05, 0.003);
+#ifdef PARTICLE_TEST
+        v[vertexSize*i+0] = random::normal(0.0, 0.03);
+        v[vertexSize*i+1] = 1;
+        v[vertexSize*i+2] = (i%2) ? 0.4 : -0.4;
+        v[vertexSize*i+3] = 0;
+        v[vertexSize*i+4] = 0;
+        v[vertexSize*i+5] = ((i%2) ? -1 : 1);
+#else
         // pos
-        v[vertexSize*i+0] = 0;
-        v[vertexSize*i+1] = 0;
-        v[vertexSize*i+2] = 0;
+        int idx_x = i % PARTICLE_GRIDSIZE;
+        int idx_y = i / (PARTICLE_GRIDSIZE * PARTICLE_GRIDSIZE);
+        int idx_z = (i / PARTICLE_GRIDSIZE) % PARTICLE_GRIDSIZE;
+        float posx = idx_x * distance - PARTICLE_GRIDSCALE/2.f;
+        float posy = idx_y * distance + PARTICLE_SPAWN_HEIGHT;
+        float posz = idx_z * distance - PARTICLE_GRIDSCALE/2.f;
+        float jitter = distance * PARTICLE_JITTER_FACTOR;
+        v[vertexSize*i+0] = posx + random::uniform(-jitter, jitter);
+        v[vertexSize*i+1] = posy + random::uniform(-jitter, jitter);
+        v[vertexSize*i+2] = posz + random::uniform(-jitter, jitter);
         // impulse
         v[vertexSize*i+3] = 0;
-        v[vertexSize*i+4] = 1;
+        v[vertexSize*i+4] = 0;
         v[vertexSize*i+5] = 0;
+#endif
         // color
-        v[vertexSize*i+6] = 0;
-        v[vertexSize*i+7] = 0;
-        v[vertexSize*i+8] = 0;
-        v[vertexSize*i+9] = 0;
+        v[vertexSize*i+6] = random::uniform(0.3, 1);
+        v[vertexSize*i+7] = random::uniform(0.3, 1);
+        v[vertexSize*i+8] = random::uniform(0.3, 1);
+        v[vertexSize*i+9] = radius;
         // age
         v[vertexSize*i+10] = 0;
         // mass
@@ -205,29 +230,34 @@ void cuda_test() {
 
 void init()
 {
+    random::init_generator();
     camera = new ArcballCamera();
-    camera->setLookAt(vec3(0,0,3), vec3(0,0,0), vec3(0,1,0));
+    vec3 pos = vec3(2, 2, 3);
+    camera->setRadius(pos.norm());
+    camera->setLookAt(pos, vec3(0,0,0), vec3(0,1,0));
     initGL();
     initBuffers();
     glutPostRedisplay();
 }
 
-void shutdown()
-{
-	// unregister particle buffer to cuda
-    // TODO: 1b)
+void deleteBuffers() {
     cudaGLUnregisterBufferObject(particlesVBO);
+    cudaFree(particle_f_tmp);
     cudaFree(particle_data);
 
-	if(glIsBuffer(particlesVBO))
-		glDeleteBuffers(1, &particlesVBO);
+    if(glIsBuffer(particlesVBO))
+        glDeleteBuffers(1, &particlesVBO);
 
-	if(glIsBuffer(volcanoVBO))
-		glDeleteBuffers(1, &volcanoVBO);
+    if(glIsBuffer(volcanoVBO))
+        glDeleteBuffers(1, &volcanoVBO);
 
-	if(glIsBuffer(volcanoIBO))
-		glDeleteBuffers(1, &volcanoIBO);
+    if(glIsBuffer(volcanoIBO))
+        glDeleteBuffers(1, &volcanoIBO);
+}
 
+void shutdown()
+{
+    deleteBuffers();
 	SAFE_DELETE(camera);
 	SAFE_DELETE(volcanoShaderProgram);
 	SAFE_DELETE(fireShaderProgram);
@@ -242,7 +272,7 @@ void display()
         cudaGLMapBufferObject((void**) &particle_data, particlesVBO);
 
         const REAL timestep = REAL(0.005);
-        launchParticleKernel(particle_data, NUM_PARTICLES, t, timestep);
+        launchParticleKernel(particle_data, particle_f_tmp, NUM_PARTICLES, t, timestep);
         t += timestep;
 
 #ifdef DEBUG_TO_COUT
@@ -321,12 +351,16 @@ void display()
 	glEnableVertexAttribArray(3);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	
+#ifdef BLENDING
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     glDepthMask(GL_FALSE);
+#endif
 	glDrawArrays(GL_POINTS, 0, particlesNumVertices);
+#ifdef BLENDING
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
+#endif
 	
 	glDisableVertexAttribArray(0);
 	glDisableVertexAttribArray(1);
@@ -390,16 +424,21 @@ void key(unsigned char key, int x, int y)
 {
     switch(key) {
 
-		case 27: // ESCAPE KEY
+        case 27: // ESCAPE
 			shutdown();
 			exit(0);
 			break;
 
-		case 32:
-			runSimulation = !runSimulation;
-            std::cout << "RUN" << std::endl;
+        case 32: // SPACE
+            runSimulation = !runSimulation;
 			break;
+
+        case 114: // R
+            deleteBuffers();
+            initBuffers();
+            break;
 	}
+//    std::cout << (int)key << std::endl;
     glutPostRedisplay();
 }
 
@@ -411,7 +450,7 @@ int main(int argc, char* argv[])
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH);
     glutInitWindowSize(WIDTH, HEIGHT);
-    glutCreateWindow("Volcano");
+    glutCreateWindow("Ball Pit");
     glutDisplayFunc(display);
     glutReshapeFunc(resize);
     glutIdleFunc(idle);

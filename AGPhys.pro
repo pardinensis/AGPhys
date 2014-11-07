@@ -38,7 +38,8 @@ LIBS += -L$$CUDA_DIR/lib/Win32 -lcuda -lcudart
 
 ## headers
 INCLUDEPATH += $$PWD/include
-HEADERS += $$PWD/include/*.h
+HEADERS += $$PWD/include/*.h \
+    include/misc.h
 
 ## sources
 SOURCES += main.cpp
@@ -55,9 +56,13 @@ OTHER_FILES += $$PWD/media/shader/* \
     media/shader/sphere.fs
 
 ## cuda sources
+CUDA_HEADERS += \
+    $$PWD/cuda/random.cuh \
+    $$PWD/cuda/integrator.cuh \
+OTHER_FILES += $$CUDA_HEADERS
 CUDA_SOURCES += \
-    particle.cu \
-    hello_world.cu
+    $$PWD/cuda/particle.cu \
+    $$PWD/cuda/hello_world.cu
 OTHER_FILES += $$CUDA_SOURCES
 
 ## cuda libs
@@ -67,7 +72,7 @@ CUDA_INC = $$join(INCLUDEPATH,'" -I "','-I "','"')
 
 ## cuda compiler options
 SYSTEM_TYPE = 32
-CUDA_ARCH = compute_13
+CUDA_ARCH = sm_20
 
 ## cuda compiler
 cuda.input = CUDA_SOURCES

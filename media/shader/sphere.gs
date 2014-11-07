@@ -4,7 +4,6 @@ layout (points) in;
 layout (triangle_strip, max_vertices = 3) out;
 
 in vec4 C[];
-in float R[];
 
 out VertexData
 {
@@ -30,8 +29,8 @@ void main()
     vec3 up = vec3(view_matrix[0][1], view_matrix[1][1], view_matrix[2][1]);
     vec3 right = cross(view, up);
 
-    radius = R[0];
-    vec4 color = C[0];
+    radius = C[0].w;
+    vec4 color = vec4(C[0].xyz, 1);
 
     float a_05 = 1.73205 * radius;
 
