@@ -6,6 +6,7 @@
 #include <cuda_gl_interop.h>
 #include <helper_cuda.h>
 #include <algorithm>
+#include <ctime>
 #include "misc.h"
 #include "camera.h"
 #include "shaderprogram.h"
@@ -13,16 +14,18 @@
 #include "fileutils.h"
 #include "matrixutils.h"
 
-//#define DEBUG_TO_COUT
+#include <Windows.h>
 
+//#define DEBUG_TO_COUT
 //#define VOLCANO
 //#define PARTICLE_TEST
 
+#define NUM_PARTICLES 1024 * 64
 #define WIDTH 1024
 #define HEIGHT 768
-#define NUM_PARTICLES 4096
-#define PARTICLE_GRIDSIZE 8
-#define PARTICLE_GRIDSCALE 1
+#define PARTICLE_GRIDSIZE_X 16
+#define PARTICLE_GRIDSIZE_Z 16
+#define PARTICLE_GRIDSCALE 0.2
 #define PARTICLE_JITTER_FACTOR 0.2
 #define PARTICLE_SPAWN_HEIGHT 3
 
@@ -41,11 +44,14 @@ REAL t = REAL(0);
 
 float* particle_data;
 float* particle_f_tmp;
+float* particle_sas_key1, *particle_sas_value1;
 
 // forward declaration
 extern "C" 
 {
-    void launchParticleKernel(float *ptVbo, float* f_tmp, int numParticles, float t, float dT);
+    void launchParticleKernel(float *ptVbo, float* f_tmp,
+                              float* sas_key1, float* sas_value1,
+                              int numParticles, float t, float dT);
     void launchKernel(float* a, float* b, float* c);
 }
 
@@ -157,13 +163,15 @@ void initBuffers()
     delete [] t;
 #endif
 
-    // create particles
     cudaMalloc((void**) &particle_f_tmp, NUM_PARTICLES * 3 * sizeof(float));
+    cudaMalloc((void**) &particle_sas_key1, NUM_PARTICLES * 2 * sizeof(float));
+    cudaMalloc((void**) &particle_sas_value1, NUM_PARTICLES * 2 * sizeof(float));
+
+    // create particles
     glGenBuffers(1, &particlesVBO);
     glBindBuffer(GL_ARRAY_BUFFER, particlesVBO);
     vertexSize = 12; //layout: 3 position, 3 impulse, 4 color, 1 age, 1 mass
     v = new float[NUM_PARTICLES * vertexSize];
-    float distance = PARTICLE_GRIDSCALE / (float)std::max(PARTICLE_GRIDSIZE - 1, 1);
     for (unsigned int i = 0; i < NUM_PARTICLES; ++i) {
         float radius = random::normal(0.05, 0.003);
 #ifdef PARTICLE_TEST
@@ -175,13 +183,13 @@ void initBuffers()
         v[vertexSize*i+5] = ((i%2) ? -1 : 1);
 #else
         // pos
-        int idx_x = i % PARTICLE_GRIDSIZE;
-        int idx_y = i / (PARTICLE_GRIDSIZE * PARTICLE_GRIDSIZE);
-        int idx_z = (i / PARTICLE_GRIDSIZE) % PARTICLE_GRIDSIZE;
-        float posx = idx_x * distance - PARTICLE_GRIDSCALE/2.f;
-        float posy = idx_y * distance + PARTICLE_SPAWN_HEIGHT;
-        float posz = idx_z * distance - PARTICLE_GRIDSCALE/2.f;
-        float jitter = distance * PARTICLE_JITTER_FACTOR;
+        int idx_x = i % PARTICLE_GRIDSIZE_X;
+        int idx_y = i / (PARTICLE_GRIDSIZE_X * PARTICLE_GRIDSIZE_Z);
+        int idx_z = (i / PARTICLE_GRIDSIZE_X) % PARTICLE_GRIDSIZE_Z;
+        float posx = idx_x * PARTICLE_GRIDSCALE - PARTICLE_GRIDSCALE*(PARTICLE_GRIDSIZE_X-1)/2.f;
+        float posy = idx_y * PARTICLE_GRIDSCALE + PARTICLE_SPAWN_HEIGHT;
+        float posz = idx_z * PARTICLE_GRIDSCALE - PARTICLE_GRIDSCALE*(PARTICLE_GRIDSIZE_Z-1)/2.f;
+        float jitter = PARTICLE_GRIDSCALE * PARTICLE_JITTER_FACTOR;
         v[vertexSize*i+0] = posx + random::uniform(-jitter, jitter);
         v[vertexSize*i+1] = posy + random::uniform(-jitter, jitter);
         v[vertexSize*i+2] = posz + random::uniform(-jitter, jitter);
@@ -243,6 +251,8 @@ void init()
 void deleteBuffers() {
     cudaGLUnregisterBufferObject(particlesVBO);
     cudaFree(particle_f_tmp);
+    cudaFree(particle_sas_key1);
+    cudaFree(particle_sas_value1);
     cudaFree(particle_data);
 
     if(glIsBuffer(particlesVBO))
@@ -263,30 +273,108 @@ void shutdown()
 	SAFE_DELETE(fireShaderProgram);
 }
 
+std::vector<double> msec_times;
+ULONGLONG ull_before = 0;
+void calc_time_stats() {
+    if (msec_times.empty()) return;
+
+//    const double outlier_factor = 10;
+
+    // calculate median
+    std::sort(msec_times.begin(), msec_times.end());
+    double median = msec_times[(msec_times.size()-1)/2];
+
+    // calculate mean
+    double msec_sum = 0;
+    unsigned int msec_ctr = 0;
+    for (unsigned int i = 0; i < msec_times.size(); ++i) {
+        double t = msec_times[i];
+//        if (t / median < outlier_factor && median / t < outlier_factor) {
+            msec_sum += t;
+            ++msec_ctr;
+//        }
+    }
+    double mean = msec_sum / msec_ctr;
+
+    // calculate variance
+    double msec_varsum = 0;
+    for (unsigned int i = 0; i < msec_times.size(); ++i) {
+        double t = msec_times[i];
+//        if (t / median < outlier_factor && median / t < outlier_factor) {
+            msec_varsum += (t - mean) * (t - mean);
+//        }
+    }
+    double variance = 0;
+    if (msec_ctr > 1)
+        variance = msec_varsum / (msec_ctr - 1);
+
+    std::cout << std::endl;
+    std::cout << "[[ TIMING RESULTS ]]" << std::endl;
+    std::cout << "median = " << median << std::endl;
+    std::cout << "avg = " << mean << std::endl;
+    std::cout << "stddev = " << sqrt(variance) << std::endl;
+    std::cout << std::endl;
+
+    msec_times.clear();
+}
+
 void display()
 {
 	// simulation
 	if(runSimulation)
     {
-        // TODO: 1c)
         cudaGLMapBufferObject((void**) &particle_data, particlesVBO);
 
+        // Query Performance Counter (does not work correctly)
+        // LARGE_INTEGER freq;
+        // LARGE_INTEGER before;
+        // LARGE_INTEGER after;
+        // QueryPerformanceFrequency(&freq);
+        // QueryPerformanceCounter(&before);
+
+        // System Time
+//        FILETIME ft_before;
+//        GetSystemTimeAsFileTime(&ft_before);
+//        ULARGE_INTEGER uli_before;
+//        uli_before.HighPart = ft_before.dwHighDateTime;
+//        uli_before.LowPart = ft_before.dwLowDateTime;
+
         const REAL timestep = REAL(0.005);
-        launchParticleKernel(particle_data, particle_f_tmp, NUM_PARTICLES, t, timestep);
+        launchParticleKernel(particle_data, particle_f_tmp,
+                             particle_sas_key1, particle_sas_value1,
+                             NUM_PARTICLES, t, timestep);
         t += timestep;
 
+        // QueryPerformanceCounter(&after);
+        // double msecs = (after.QuadPart - before.QuadPart) * 1000.0 / freq.QuadPart;
+
+        FILETIME ft_after;
+        GetSystemTimeAsFileTime(&ft_after);
+        ULARGE_INTEGER uli_after;
+        uli_after.HighPart = ft_after.dwHighDateTime;
+        uli_after.LowPart = ft_after.dwLowDateTime;
+        ULONGLONG ull_after = uli_after.QuadPart;
+
+        if (ull_before) {
+            unsigned int diff = ull_after - ull_before;
+            double msecs = diff / 10000.0;
+            msec_times.push_back(msecs);
+            std::cout << msecs << std::endl;
+        }
+        ull_before = ull_after;
+
 #ifdef DEBUG_TO_COUT
-        float tmp[12];
-        cudaMemcpy(tmp, particle_data, 12*sizeof(float),
+        float tmp[2*NUM_PARTICLES];
+        cudaMemcpy(tmp, particle_sas_value1, 2*NUM_PARTICLES*sizeof(float),
                    cudaMemcpyDeviceToHost);
-        for (int i = 0; i < 12; ++i)
+        for (int i = 0; i < 2*NUM_PARTICLES; ++i)
             std::cout << tmp[i] << " ";
         std::cout << std::endl;
 #endif
 
         cudaGLUnmapBufferObject(particlesVBO);
-	}
-	
+    }
+
 	//
 	mat4 viewM, projM, modelM;
 	mat3 normalM;
@@ -366,8 +454,7 @@ void display()
 	glDisableVertexAttribArray(1);
 	glDisableVertexAttribArray(2);
 	glDisableVertexAttribArray(3);
-	fireShaderProgram->release();
-
+    fireShaderProgram->release();
     glutSwapBuffers();
 }
 
@@ -431,6 +518,10 @@ void key(unsigned char key, int x, int y)
 
         case 32: // SPACE
             runSimulation = !runSimulation;
+            if (!runSimulation) {
+                calc_time_stats();
+                ull_before = 0;
+            }
 			break;
 
         case 114: // R
